@@ -4,7 +4,12 @@ import { timerManager, type StepTimer, type TaskTimer } from './timer/TimerManag
 import { favoriteManager, type FavoriteBreakdown } from './favorites/FavoriteManager';
 import './App.css';
 
+type Tab = 'home' | 'library' | 'settings';
+
 function App() {
+  const [activeTab, setActiveTab] = useState<Tab>('home');
+
+  // Home tab state
   const [taskInput, setTaskInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(false);
@@ -12,18 +17,18 @@ function App() {
   const [breakdown, setBreakdown] = useState<{ response: string; fromCache: boolean; inferenceTime: number } | null>(null);
   const [memoryUsage, setMemoryUsage] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('Not initialized');
-  const [loadProgress, setLoadProgress] = useState<string>('');
+  const [loadProgress, setLoadProgress] = useState('');
   const [cacheStats, setCacheStats] = useState({ size: 0, sizeBytes: 0 });
-  const [showCache, setShowCache] = useState(false);
 
   // Timer state
   const [activeTimer, setActiveTimer] = useState<TaskTimer | null>(null);
   const [showTimerUI, setShowTimerUI] = useState(false);
 
-  // Favorites state
-  const [showFavorites, setShowFavorites] = useState(false);
+  // Library state
   const [favoritesList, setFavoritesList] = useState<FavoriteBreakdown[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Settings state
 
   // Parsed steps
   const [steps, setSteps] = useState<string[]>([]);
@@ -48,16 +53,16 @@ function App() {
     timerManager.onTick(handleTick);
 
     return () => {
-      // TimerManager doesn't have an unregister method, but we can clear the callback
-      // by setting a no-op handler
       timerManager.onTick(() => {});
     };
   }, []);
 
-  // Load favorites list
+  // Load favorites list on mount and library tab
   useEffect(() => {
-    setFavoritesList(favoriteManager.getAll());
-  }, [showFavorites]);
+    if (activeTab === 'library') {
+      setFavoritesList(favoriteManager.getAll());
+    }
+  }, [activeTab]);
 
   // Parse breakdown when it changes
   useEffect(() => {
@@ -191,14 +196,12 @@ function App() {
     );
 
     setFavoritesList(favoriteManager.getAll());
-    alert('Saved to favorites!');
+    alert('Saved to library!');
   };
 
   const handleSelectFavorite = (favorite: FavoriteBreakdown) => {
     setTaskInput(favorite.task);
     const parsed = parseBreakdown(favorite.response);
-    setSteps(parsed.steps);
-    setEstimatedTimes(parsed.estimatedTimes);
 
     setBreakdown({
       response: favorite.response,
@@ -206,21 +209,35 @@ function App() {
       inferenceTime: 0,
     });
 
-    setShowFavorites(false);
-    setShowTimerUI(true);
+    setSteps(parsed.steps);
+    setEstimatedTimes(parsed.estimatedTimes);
+    setShowTimerUI(false);
+
+    // Update last used time
+    favoriteManager.touch(favorite.id);
+    setFavoritesList(favoriteManager.getAll());
+    setActiveTab('home');
   };
 
   const handleDeleteFavorite = (id: string) => {
-    if (confirm('Delete this favorite?')) {
+    if (confirm('Delete this saved breakdown?')) {
       favoriteManager.remove(id);
       setFavoritesList(favoriteManager.getAll());
     }
   };
 
   const handleClearCache = () => {
+    const beforeCount = cacheStats.size;
     llmService.clearCache();
-    setCacheStats({ size: 0, sizeBytes: 0 });
-    alert('Cache cleared!');
+    const afterCount = llmService.getCacheStats().size;
+
+    const cleared = beforeCount - afterCount;
+    if (cleared > 0) {
+      alert(`Cleared ${cleared} cached responses`);
+      setCacheStats(llmService.getCacheStats());
+    } else {
+      alert('No cached responses to clear');
+    }
   };
 
   const parseBreakdown = (response: string): { steps: string[]; estimatedTimes: number[] } => {
@@ -228,25 +245,24 @@ function App() {
     const steps: string[] = [];
     const times: number[] = [];
 
-    console.log('[App] Parsing breakdown:', response.substring(0, 200) + '...');
-    console.log('[App] Total lines:', lines.length);
+    console.log('[App] 🔍 Parsing breakdown with', lines.length, 'lines');
 
     lines.forEach((line, idx) => {
-      console.log(`[App] Line ${idx}:`, line.substring(0, 80));
+      console.log(`[App] 🔍 Parsing line ${idx}: "${line.trim()}"`);
 
-      // Skip sub-bullets (indented lines starting with * or -)
-      if (line.match(/^\s+\*+/) || line.match(/^\s+-/) || line.match(/^\s+•/)) {
-        console.log(`[App] Skipped sub-bullet/indented line`);
-        return;
+      let match: RegExpMatchArray | null;
+
+      // Priority 1: Numbered format "Step 1: Do something (5 min)"
+      match = line.match(/^step\s*\d+:\s*([^()]+?)\s*\((\d+)\s*min\)/i);
+      if (!match) {
+        // Try alternative format "1. Do something (5 min)"
+        match = line.match(/^\d+\.\s*([^()]+?)\s*\((\d+)\s*min\)/i);
       }
 
-      // Priority 1: Numbered format "1. Action (X min)" - this is the main step
-      let match = line.match(/^\d+\.\s+([^()]+?)\s*\((\d+)\s*min\)/i);
       if (match) {
         const stepText = match[1].trim();
         const timeText = parseInt(match[2], 10);
 
-        // Skip placeholder steps
         if (stepText.toLowerCase().includes('clear action')) {
           console.log(`[App] Skipped numbered placeholder: "${stepText}"`);
           return;
@@ -264,7 +280,6 @@ function App() {
         const stepText = match[1].trim();
         const timeText = parseInt(match[2], 10);
 
-        // Skip placeholder steps
         if (stepText.toLowerCase().includes('clear action')) {
           console.log(`[App] Skipped bracket placeholder: "${stepText}"`);
           return;
@@ -282,7 +297,6 @@ function App() {
         const stepText = match[1].trim();
         const timeText = parseInt(match[2], 10);
 
-        // Skip placeholder steps
         if (stepText.toLowerCase().includes('clear action')) {
           console.log(`[App] Skipped bullet placeholder: "${stepText}"`);
           return;
@@ -328,334 +342,298 @@ function App() {
     return (completed / activeTimer.steps.length) * 100;
   };
 
-  return (
-    <div className="app-container">
-      <div className="content">
-        <h1 className="title">🧩 FocusMate AI</h1>
-        <p className="subtitle">
-          Local LLM Task Breakdown + Timer
-          <span className="platform-badge">PWA Mode (Web-LLM)</span>
-        </p>
+  const filteredFavorites = favoritesList.filter(f =>
+    !searchQuery || f.task.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
-        {/* Favorites Button */}
-        <button
-          className="icon-button"
-          onClick={() => setShowFavorites(!showFavorites)}>
-          ⭐ Favorites ({favoritesList.length})
+  // Render Home Tab
+  const renderHome = () => (
+    <div className="tab-content">
+      <div className="task-input-section">
+        <textarea
+          className="task-textarea"
+          value={taskInput}
+          onChange={(e) => setTaskInput(e.target.value)}
+          placeholder={initialized ? "What task would you like to break down?" : "Initialize the model to get started..."}
+          disabled={!initialized || loading}
+          rows={3}
+        />
+      </div>
+
+      <div className="actions-section">
+        {!initialized && !initializing && (
+          <button className="ios-button primary" onClick={handleInitialize}>
+            Initialize Model
+          </button>
+        )}
+
+        {initializing && (
+          <div className="loading-container">
+            <div className="spinner" />
+            <p className="loading-text">
+              {loadProgress || 'Downloading model (~900MB)...'}
+            </p>
+          </div>
+        )}
+
+        {(initialized || showTimerUI) && (
+          <button
+            className={`ios-button primary ${!taskInput.trim() || loading ? 'disabled' : ''}`}
+            onClick={handleBreakdown}
+            disabled={!taskInput.trim() || loading}>
+            {loading ? <div className="spinner-small" /> : 'Break It Down'}
+          </button>
+        )}
+
+        {showTimerUI && (
+          <button className="ios-button danger" onClick={() => {
+            timerManager.stopTask();
+            setShowTimerUI(false);
+            setActiveTimer(null);
+          }}>
+            Cancel Timer
+          </button>
+        )}
+      </div>
+
+      {breakdown && (
+        <div className="breakdown-section">
+          <div className="breakdown-header">
+            <h2>Breakdown</h2>
+            <button className="ios-icon-button" onClick={handleSaveFavorite}>
+              ⭐ Save
+            </button>
+          </div>
+
+          {!showTimerUI && (
+            <div className="breakdown-stats">
+              <span>⏱️ {breakdown.inferenceTime.toFixed(0)}ms</span>
+              {breakdown.fromCache && <span className="cache-tag">💾 Cached</span>}
+            </div>
+          )}
+
+          {showTimerUI && activeTimer && (
+            <div className="timer-overview">
+              <div className="timer-main-display">
+                <div className="total-time">{timerManager.formatTime(activeTimer.totalElapsed)}</div>
+                <div className="progress-info">
+                  {activeTimer.steps.filter(s => s.isCompleted).length} / {activeTimer.steps.length} completed
+                </div>
+              </div>
+              <div className="progress-bar">
+                <div className="progress-fill" style={{ width: `${getProgressPercentage()}%` }} />
+              </div>
+              <div className="timer-actions-row">
+                <button className="ios-button success" onClick={handleCompleteTask}>
+                  ✅ Complete
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="steps-list">
+            {steps.map((step, index) => {
+              const stepTimer = activeTimer?.steps[index];
+              const isCompleted = stepTimer?.isCompleted;
+              const isRunning = stepTimer?.isRunning;
+
+              return (
+                <div
+                  key={index}
+                  className={`step-card ${isCompleted ? 'completed' : ''} ${isRunning ? 'running' : ''}`}
+                >
+                  <div className="step-main">
+                    <div className="step-left">
+                      <input
+                        type="checkbox"
+                        className="step-checkbox"
+                        checked={!!isCompleted}
+                        onChange={(e) => handleCompleteStep(index, e.target.checked)}
+                      />
+                      <span className="step-number">{index + 1}</span>
+                    </div>
+                    <div className="step-right">
+                      <p className="step-text">{step}</p>
+                      <div className="step-footer">
+                        <span className="step-time">⏱️ {estimatedTimes[index]} min</span>
+                        {showTimerUI && stepTimer && (
+                          <>
+                            <span className="step-elapsed">{timerManager.formatTime(stepTimer.elapsedTime)}</span>
+                            <button
+                              className={`step-toggle ${isRunning ? 'active' : ''}`}
+                              onClick={() => handleToggleStep(index)}>
+                              {isRunning ? '⏸️' : '▶️'}
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {!showTimerUI && steps.length > 0 && (
+            <button className="ios-button success full-width" onClick={handleStartTimer}>
+              ▶️ Start Timer
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  // Render Library Tab
+  const renderLibrary = () => (
+    <div className="tab-content">
+      <div className="search-bar">
+        <input
+          className="search-input"
+          type="text"
+          placeholder="Search saved tasks..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
+      </div>
+
+      <div className="favorites-list">
+        {filteredFavorites.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-icon">⭐</div>
+            <p>No saved tasks yet</p>
+            <p className="empty-subtext">Save your breakdowns for quick access</p>
+          </div>
+        ) : (
+          filteredFavorites.map((favorite) => (
+            <div key={favorite.id} className="favorite-card">
+              <div className="favorite-content">
+                <h3 className="favorite-title">{favorite.task}</h3>
+                <p className="favorite-meta">
+                  ⏱️ {favorite.totalEstimatedTime} min • Used {favorite.usageCount} times
+                </p>
+                <p className="favorite-date">
+                  Saved {new Date(favorite.savedAt).toLocaleDateString()}
+                </p>
+              </div>
+              <div className="favorite-actions">
+                <button
+                  className="ios-button secondary"
+                  onClick={() => handleSelectFavorite(favorite)}>
+                  Use
+                </button>
+                <button
+                  className="ios-icon-button danger"
+                  onClick={() => handleDeleteFavorite(favorite.id)}>
+                  🗑️
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+
+  // Render Settings Tab
+  const renderSettings = () => (
+    <div className="tab-content">
+      <div className="settings-group">
+        <h3>Model Status</h3>
+        <div className="setting-item">
+          <span className="setting-label">Status</span>
+          <span className="setting-value">{status}</span>
+        </div>
+        {memoryUsage && (
+          <div className="setting-item">
+            <span className="setting-label">Memory</span>
+            <span className="setting-value">{memoryUsage}</span>
+          </div>
+        )}
+        {cacheStats.size > 0 && (
+          <div className="setting-item">
+            <span className="setting-label">Cache</span>
+            <span className="setting-value">{cacheStats.size} responses</span>
+          </div>
+        )}
+      </div>
+
+      <div className="settings-group">
+        <h3>Model Info</h3>
+        <div className="setting-item">
+          <span className="setting-label">Model</span>
+          <span className="setting-value">Qwen2-1.5B-Instruct</span>
+        </div>
+        <div className="setting-item">
+          <span className="setting-label">Size</span>
+          <span className="setting-value">~900MB</span>
+        </div>
+        <div className="setting-item">
+          <span className="setting-label">Quantization</span>
+          <span className="setting-value">Q4 (4-bit)</span>
+        </div>
+      </div>
+
+      <div className="settings-group">
+        <h3>Cache Management</h3>
+        <div className="setting-item">
+          <span className="setting-label">Cached Responses</span>
+          <span className="setting-value">{cacheStats.size}</span>
+        </div>
+        <div className="setting-item">
+          <span className="setting-label">Cache Size</span>
+          <span className="setting-value">{(cacheStats.sizeBytes / 1024).toFixed(1)} KB</span>
+        </div>
+        <button className="ios-button danger" onClick={handleClearCache}>
+          Clear Cache
         </button>
+      </div>
 
-        {/* LLM Status */}
-        <div className="status-container">
-          <p className="status-text">
-            Status: {status}
-          </p>
-          {loadProgress && (
-            <p className="status-text progress-text">
-              {loadProgress}
-            </p>
-          )}
-          {cacheStats.size > 0 && (
-            <p className="cache-stats">
-              📦 {cacheStats.size} cached responses ({(cacheStats.sizeBytes / 1024).toFixed(1)} KB)
-            </p>
-          )}
+      <div className="settings-group">
+        <h3>About</h3>
+        <div className="setting-item">
+          <span className="setting-label">Version</span>
+          <span className="setting-value">1.0.0</span>
         </div>
-
-        {/* Favorites Modal */}
-        {showFavorites && (
-          <div className="modal-overlay">
-            <div className="modal">
-              <h2 className="modal-title">⭐ Saved Breakdowns</h2>
-
-              <div className="search-container">
-                <input
-                  className="search-input"
-                  placeholder="Search favorites..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-              </div>
-
-              <div className="favorites-list">
-                {favoritesList.length === 0 ? (
-                  <p className="empty-favorites">No saved breakdowns yet</p>
-                ) : (
-                  <div className="favorites-entries">
-                    {favoritesList
-                      .filter(f =>
-                        !searchQuery || f.task.toLowerCase().includes(searchQuery.toLowerCase())
-                      )
-                      .map((favorite) => (
-                        <div key={favorite.id} className="favorite-item">
-                          <div className="favorite-header">
-                            <h3 className="favorite-task">{favorite.task}</h3>
-                            <div className="favorite-actions">
-                              <button
-                                className="small-button primary-button"
-                                onClick={() => handleSelectFavorite(favorite)}>
-                                ▶️ Use
-                              </button>
-                              <button
-                                className="small-button danger-button"
-                                onClick={() => handleDeleteFavorite(favorite.id)}>
-                                🗑️
-                              </button>
-                            </div>
-                          </div>
-                          <p className="favorite-time">
-                            Saved {new Date(favorite.savedAt).toLocaleDateString()} • Used {favorite.usageCount} times
-                          </p>
-                        </div>
-                      ))}
-                  </div>
-                )}
-              </div>
-
-              <button
-                className="close-modal-btn"
-                onClick={() => setShowFavorites(false)}>
-                Close
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Input Section */}
-        {!showTimerUI && (
-          <>
-            <div className="input-container">
-              <label htmlFor="taskInput" className="label">
-                Enter a task:
-              </label>
-              <input
-                id="taskInput"
-                className="input"
-                value={taskInput}
-                onChange={(e) => setTaskInput(e.target.value)}
-                placeholder={initialized ? "e.g., clean the kitchen" : "Initialize LLM first..."}
-                onKeyDown={(e) => e.key === 'Enter' && handleBreakdown()}
-                disabled={!initialized || loading}
-              />
-            </div>
-
-            <>
-              {!initialized && !initializing && (
-                <button
-                  className="button init-button"
-                  onClick={handleInitialize}>
-                  Initialize Web-LLM
-                </button>
-              )}
-
-              {initializing && (
-                <div className="loading-info">
-                  <span className="spinner" />
-                  <p className="loading-text">
-                    Downloading model (~900MB) - first load takes 1-3 minutes...
-                  </p>
-                </div>
-              )}
-
-              {(initialized || showTimerUI) && (
-                <button
-                  className={`button ${(!taskInput.trim() || loading) && 'button-disabled'}`}
-                  onClick={handleBreakdown}
-                  disabled={!taskInput.trim() || loading}>
-                  {loading ? (
-                    <span className="spinner" />
-                  ) : (
-                    'Break it Down!'
-                  )}
-                </button>
-              )}
-            </>
-          </>
-        )}
-
-        {/* Results with Timer */}
-        {breakdown && (
-          <div className="result-container">
-            <div className="result-header">
-              <h2 className="result-title">
-                {showTimerUI ? 'Task Timer' : 'Breakdown:'}
-              </h2>
-              <>
-                {!showTimerUI && (
-                  <span className={`cache-badge ${breakdown.fromCache ? 'cache-hit' : 'cache-miss'}`}>
-                    {breakdown.fromCache ? '💾 From Cache (< 1ms)' : '🔄 Fresh Generation'}
-                  </span>
-                )}
-                {!showTimerUI && (
-                  <button
-                    className="icon-button"
-                    onClick={handleSaveFavorite}
-                    disabled={showTimerUI}>
-                    ⭐ Save
-                  </button>
-                )}
-              </>
-            </div>
-
-            {!showTimerUI && (
-              <div className="stats">
-                <span className="stat">
-                  ⏱️ {breakdown.inferenceTime.toFixed(0)}ms
-                </span>
-                {memoryUsage && <span className="stat">💾 {memoryUsage}</span>}
-              </div>
-            )}
-
-            {/* Timer UI */}
-            {showTimerUI && activeTimer && (
-              <>
-                <div className="timer-header">
-                  <h3 className="task-title">{activeTimer.task}</h3>
-                  <div className="timers">
-                    <span className="timer-display">
-                      ⏱️ Total: {timerManager.formatTime(activeTimer.totalElapsed)}
-                    </span>
-                    <span className="timer-display">
-                      🎯 Progress: {activeTimer.steps.filter(s => s.isCompleted).length}/{activeTimer.steps.length}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="progress-bar-container">
-                  <div
-                    className="progress-bar"
-                    style={{ width: `${getProgressPercentage()}%` }}
-                  />
-                </div>
-
-                <div className="timer-actions">
-                  <button
-                    className="button complete-button"
-                    onClick={handleCompleteTask}>
-                    ✅ Complete Task
-                  </button>
-                  <button
-                    className="button cancel-button"
-                    onClick={() => {
-                      timerManager.stopTask();
-                      setShowTimerUI(false);
-                      setActiveTimer(null);
-                    }}>
-                    ❌ Cancel
-                  </button>
-                </div>
-              </>
-            )}
-
-            <div className="result">
-              {showTimerUI && activeTimer ? (
-                /* Timer Mode: Steps with checkboxes */
-                <div className="timer-steps">
-                  {activeTimer.steps.map((step, idx) => (
-                    <div
-                      key={`step-${idx}-${step.isCompleted}`}
-                      className={`timer-step ${step.isCompleted ? 'step-completed' : ''} ${step.isRunning ? 'step-running' : ''}`}>
-                      <div className="step-left">
-                        <input
-                          type="checkbox"
-                          checked={step.isCompleted}
-                          onChange={(e) => {
-                            console.log(`[App] 🔄 Checkbox changed: idx=${idx}, checked=${e.target.checked}, current state=${step.isCompleted}`);
-                            handleCompleteStep(idx, e.target.checked);
-                          }}
-                          className="step-checkbox"
-                        />
-                        <span className="step-number">{idx + 1}.</span>
-                      </div>
-                      <div className="step-main">
-                        <p className="step-text">{step.step}</p>
-                        <div className="step-timer-control">
-                          <button
-                            className={`timer-toggle ${step.isCompleted ? 'disabled' : ''}`}
-                            onClick={() => !step.isCompleted && handleToggleStep(idx)}
-                            disabled={step.isCompleted}>
-                            {step.isRunning ? '⏸️ Pause' : '▶️ Start'}
-                          </button>
-                          <span className="step-time">
-                            ⏱️ {timerManager.formatTime(step.elapsedTime)} / {step.estimatedTime} min
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                /* View Mode: Just show breakdown */
-                <>
-                  {steps.length > 0 ? (
-                    <div className="breakdown-plain">
-                      {steps.map((step, idx) => (
-                        <div key={idx} className="breakdown-line">
-                          {idx + 1}. {step} ({estimatedTimes[idx]} min)
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    breakdown.response.split('\n').map((line, idx) => (
-                      <div key={idx} className="breakdown-line">
-                        {line}
-                      </div>
-                    ))
-                  )}
-                  {!showTimerUI && steps.length > 0 && (
-                    <button
-                      className="button start-timer-button"
-                      onClick={handleStartTimer}>
-                      ⏱️ Start Timer
-                    </button>
-                  )}
-
-                  {/* Debug: Show if timer button should appear */}
-                  {!showTimerUI && steps.length === 0 && (
-                    <div className="debug-info">
-                      <p style={{color: 'orange', fontSize: '12px'}}>
-                        DEBUG: steps.length = 0, timer button hidden
-                        <br/>Check console for parsing errors
-                      </p>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Cache Management */}
-        {cacheStats.size > 0 && !initializing && !showTimerUI && (
-          <div className="cache-container">
-            <button
-              className="small-button"
-              onClick={() => setShowCache(!showCache)}>
-              {showCache ? 'Hide Cache' : 'View Cache'} ({cacheStats.size})
-            </button>
-            <button
-              className="small-button danger-button"
-              onClick={handleClearCache}>
-              Clear Cache
-            </button>
-          </div>
-        )}
-
-        {/* Cache Display */}
-        {showCache && (
-          <div className="cache-list">
-            <h3 className="cache-list-title">Cached Tasks:</h3>
-            <p className="cache-help">
-              Cache automatically stores task → response pairs.
-            </p>
-          </div>
-        )}
-
-        <div className="info-container">
-          <p className="info-text">
-            💡 <strong>How it works:</strong> First request generates breakdown via local LLM (~4s).
-            Subsequent same tasks are instant (&lt; 1ms) from cache. Save favorites for quick access.
-          </p>
+        <div className="setting-item">
+          <span className="setting-label">Platform</span>
+          <span className="setting-value">Native App</span>
         </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="ios-app">
+      <div className="ios-header">
+        <h1>FocusMate AI</h1>
+      </div>
+
+      <div className="ios-content">
+        {activeTab === 'home' && renderHome()}
+        {activeTab === 'library' && renderLibrary()}
+        {activeTab === 'settings' && renderSettings()}
+      </div>
+
+      <div className="ios-tab-bar">
+        <button
+          className={`tab-item ${activeTab === 'home' ? 'active' : ''}`}
+          onClick={() => setActiveTab('home')}>
+          <span className="tab-icon">🏠</span>
+          <span className="tab-label">Home</span>
+        </button>
+        <button
+          className={`tab-item ${activeTab === 'library' ? 'active' : ''}`}
+          onClick={() => setActiveTab('library')}>
+          <span className="tab-icon">📚</span>
+          <span className="tab-label">Library</span>
+        </button>
+        <button
+          className={`tab-item ${activeTab === 'settings' ? 'active' : ''}`}
+          onClick={() => setActiveTab('settings')}>
+          <span className="tab-icon">⚙️</span>
+          <span className="tab-label">Settings</span>
+        </button>
       </div>
     </div>
   );
